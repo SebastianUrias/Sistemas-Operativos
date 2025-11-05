@@ -270,6 +270,16 @@ public class MainWindow extends JFrame {
     }
 
     public static void main(String[] args) {
+        // Cambiado: detecta entorno headless y evita crear la GUI si no hay DISPLAY
+        if (java.awt.GraphicsEnvironment.isHeadless()) {
+            System.err.println("Error: No hay servidor X disponible (headless).");
+            System.err.println("Opciones:");
+            System.err.println("  1) Ejecutar con un servidor X o Xvfb en el contenedor.");
+            System.err.println("     Ejemplo: sudo apt install -y xvfb && Xvfb :99 -screen 0 1280x1024x24 & export DISPLAY=:99");
+            System.err.println("  2) Ejecutar el programa en una máquina con entorno gráfico.");
+            System.exit(2);
+        }
+
         try {
             UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
             //Configurar el aspecto de los JOptionPane
