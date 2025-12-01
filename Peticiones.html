@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Simulador de Disco Gráfico</title>
+  <style>
+    body { font-family: Arial; }
+    canvas { border: 1px solid black; margin-top: 10px; }
+    #log { white-space: pre-line; border:1px solid #ccc; padding:10px; height:200px; overflow-y:scroll; }
+    table { border-collapse: collapse; margin-top: 10px; }
+    td, th { border: 1px solid #ccc; padding: 5px; }
+    .panel { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .sim-container { display: flex; align-items: flex-start; gap: 20px; }
+  </style>
+</head>
+<body>
+  <h2>Simulador de Disco con Gráficos</h2>
+
+  <div class="panel">
+    <label for="planificador">Algoritmo:</label>
+    <select id="planificador">
+      <option value="fcfs">FCFS</option>
+      <option value="sstf">SSTF</option>
+      <option value="scan">SCAN</option>
+      <option value="nscan">N-Step SCAN</option>
+      <option value="cscan">C-SCAN</option>
+      <option value="eschenbach">Eschenbach</option>
+    </select>
+
+    <button id="generar" type="button">Generar Peticiones</button>
+    <button id="simular" type="button">Simular</button>
+    <button id="pausar" type="button" >Pausar/Reanudar</button>
+    <button id="limpiar" type="button">Limpiar Historial</button>
+  </div>
+
+  <div class="sim-container">
+    <canvas id="lienzoDisco" width="600" height="600"></canvas>
+    <div>
+      <h3>Métricas</h3>
+      <div id="metricas"></div>
+    </div>
+  </div>
+
+  <h3>Registro de eventos</h3>
+  <div id="log"></div>
+
+<script>
+// -------------------- Clases --------------------
+class Peticion {
+  constructor(cara, cilindro, sector, ronda, llegadaTime) {
+    this.cara = cara;
+    this.cilindro = cilindro;
+    this.sector = sector;
+    this.ronda = ronda;
+    this.llegada = llegadaTime ?? Date.now();
+    this.atendida = null;
+  }
+}
+
+class Cabeza {
+  constructor() {
+    this.cilindro = 0;
+    this.sector = 0;
+    this.direccion = 1; // 1 interior, -1 exterior
+  }
+}
+
+// -------------------- Estado global --------------------
+const ctx = document.getElementById("lienzoDisco").getContext("2d");
+const logDiv = document.getElementById("log");
+const metricasDiv = document.getElementById("metricas");
+
+let cabeza = new Cabeza();
+let cola = [];            // peticiones en cola
+let rondas = [];          // almacenamiento de las 3 rondas generadas
+let rondasOriginales = []; // Almacenamiento persistente de las rondas generadas
+let atendidasTotal = 0;   // contador total atendidas
+
+// Métricas
+let pistasRecorridas = 0;
+let cambiosDireccion = 0;
+let tiemposEspera = [];
+
+// Control simulación
+let pausado = false;
+let corriendo = false;
+
+// -------------------- Utilidades --------------------
+function registrar(msg) {
+  logDiv.innerText += msg + "\n";
+  logDiv.scrollTop = logDiv.scrollHeight;
+}
+
+function limpiarTodo() {
+  cabeza = new Cabeza();
+  cola = [];
+  rondas = [];
+  rondasOriginales = [];
+  atendidasTotal = 0;
+  pistasRecorridas = 0;
+  cambiosDireccion = 0;
+  tiemposEspera = [];
+  pausado = false;
+  corriendo = false;
+  logDiv.innerText = "";
+  metricasDiv.innerHTML = "";
+  dibujarDisco();
+  registrar("Historial y estado reiniciados.");
+}
+
+function reiniciarSimulacion() {
+  cabeza = new Cabeza();
+  cola = [];
+  
+  // Restaurar rondas desde la copia original
+  rondas = JSON.parse(JSON.stringify(rondasOriginales));
+  
+  atendidasTotal = 0;
+  pistasRecorridas = 0;
+  cambiosDireccion = 0;
+  tiemposEspera = [];
+  pausado = false;
+  corriendo = false;
+  logDiv.innerText = "";
+  metricasDiv.innerHTML = "";
+
+  if (rondas.length > 0 && rondas[0].length > 0) {
+    cola.push(...rondas[0]);
+    registrar("Simulación reiniciada con los datos originales. Ronda 1 cargada.");
+  }
+}
+
+// -------------------- Generación y llegada de rondas --------------------
+function generarYAlmacenarRondas() {
+  rondas = [];
+  for (let r = 1; r <= 3; r++) {
+    const lote = [];
+    for (let i = 0; i < 10; i++) {
+      lote.push(new Peticion(
+        Math.floor(Math.random() * 10),    // cara 0-9
+        Math.floor(Math.random() * 40),    // cilindro 0-39
+        Math.floor(Math.random() * 16),    // sector 0-15
+        r,
+        Date.now()
+      ));
+    }
+    rondas.push(lote);
+  }
+  rondasOriginales = JSON.parse(JSON.stringify(rondas)); // Guardar copia profunda
+  registrar("Generadas 3 rondas de 10 peticiones cada una. Guardadas para reutilización.");
+  
+  // Cargar la primera ronda en cola al inicio
+  cola.push(...rondas[0]);
+  registrar("Ronda 1 cargada en cola (10 peticiones).");
+}
+
+function gestionarLlegadas() {
+  // Al completar 10 peticiones: cargar ronda 2
+  if (atendidasTotal === 10 && rondas[1] && rondas[1].length) {
+    // Marca llegada: actualiza tiempos de llegada
+    rondas[1].forEach(p => p.llegada = Date.now());
+    cola.push(...rondas[1]);
+    registrar("Llegaron 10 peticiones (Ronda 2) y se agregaron a la cola.");
+  }
+  // A la mitad de ronda 2 (tras 15 peticiones en total): cargar ronda 3
+  if (atendidasTotal === 15 && rondas[2] && rondas[2].length) {
+    rondas[2].forEach(p => p.llegada = Date.now());
+    cola.push(...rondas[2]);
+    registrar("Llegaron 10 peticiones (Ronda 3) y se agregaron a la cola.");
+  }
+}
+
+// -------------------- Algoritmos de planificación --------------------
+function seleccionarSiguiente(algoritmo) {
+  if (cola.length === 0) return null;
+
+  switch (algoritmo) {
+    case "fcfs":
+      return cola[0];
+
+    case "sstf":
+      return cola.reduce((a, b) =>
+        Math.abs(a.cilindro - cabeza.cilindro) < Math.abs(b.cilindro - cabeza.cilindro) ? a : b
+      );
+
+    case "scan": {
+      const enDir = cola.filter(p =>
+        cabeza.direccion === 1 ? p.cilindro >= cabeza.cilindro : p.cilindro <= cabeza.cilindro
+      );
+      if (enDir.length) {
+        // avanza al más cercano en la dirección (el siguiente cilindro en esa dirección)
+        return cabeza.direccion === 1
+          ? enDir.reduce((a, b) => a.cilindro < b.cilindro ? a : b)
+          : enDir.reduce((a, b) => a.cilindro > b.cilindro ? a : b);
+      } else {
+        // invertir dirección
+        cabeza.direccion *= -1;
+        cambiosDireccion++;
+        return seleccionarSiguiente("scan");
+      }
+    }
+
+    case "nscan": {
+      // Lote fijo de 10 (por especificación), en orden de llegada actual
+      const lote = cola.slice(0, 10);
+      if (lote.length === 0) return null;
+      // aplicar una selección simple tipo SSTF dentro del lote
+      return lote.reduce((a, b) =>
+        Math.abs(a.cilindro - cabeza.cilindro) < Math.abs(b.cilindro - cabeza.cilindro) ? a : b
+      );
+    }
+
+    case "cscan": {
+      const adelante = cola.filter(p => p.cilindro >= cabeza.cilindro);
+      if (adelante.length) {
+        // el más cercano "hacia dentro" (menor cilindro por delante)
+        return adelante.reduce((a, b) => a.cilindro < b.cilindro ? a : b);
+      } else {
+        // "salto" al inicio: modelado como cambio de posición al extremo exterior (0)
+        if (cabeza.cilindro !== 0) {
+          pistasRecorridas += Math.abs(cabeza.cilindro - 0);
+          cabeza.cilindro = 0;
+          cambiosDireccion++; // registrar como salto/cambio
+          dibujarDisco();
+        }
+        // una vez "saltado", elegir el de menor cilindro de toda la cola
+        return cola.reduce((a, b) => a.cilindro < b.cilindro ? a : b);
+      }
+    }
+
+    case "eschenbach": {
+      // Priorización por dirección, dentro de esa dirección elegir el más cercano (híbrido SCAN/SSTF)
+      const enDir = cola.filter(p =>
+        cabeza.direccion === 1 ? p.cilindro >= cabeza.cilindro : p.cilindro <= cabeza.cilindro
+      );
+      if (enDir.length) {
+        return enDir.reduce((a, b) =>
+          Math.abs(a.cilindro - cabeza.cilindro) < Math.abs(b.cilindro - cabeza.cilindro) ? a : b
+        );
+      } else {
+        cabeza.direccion *= -1;
+        cambiosDireccion++;
+        return seleccionarSiguiente("eschenbach");
+      }
+    }
+  }
+  return null;
+}
+
+// -------------------- Dibujo del disco --------------------
+function dibujarDisco() {
+  ctx.clearRect(0, 0, 600, 600);
+  const centroX = 300, centroY = 300;
+  const sectores = 16;
+
+  // Representación de cilindros (solo 10 círculos para claridad visual)
+  ctx.strokeStyle = "gray";
+  for (let i = 0; i < 10; i++) {
+    const radio = 40 + i * 20;
+    ctx.beginPath();
+    ctx.arc(centroX, centroY, radio, 0, 2 * Math.PI);
+    ctx.stroke();
+  }
+
+  // Divisiones de sectores
+  for (let s = 0; s < sectores; s++) {
+    const ang = (2 * Math.PI / sectores) * s;
+    ctx.beginPath();
+    ctx.moveTo(centroX, centroY);
+    ctx.lineTo(centroX + 240 * Math.cos(ang), centroY + 240 * Math.sin(ang));
+    ctx.stroke();
+  }
+
+  // Peticiones (azules)
+  ctx.fillStyle = "blue";
+  for (const p of cola) {
+    const radio = 40 + (p.cilindro % 10) * 20;           // mapeo visual 0-39 -> 0-9
+    const ang = (2 * Math.PI / sectores) * p.sector;
+    ctx.beginPath();
+    ctx.arc(centroX + radio * Math.cos(ang), centroY + radio * Math.sin(ang), 5, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+
+  // Cabeza (roja)
+  ctx.fillStyle = "red";
+  const radioCabeza = 40 + (cabeza.cilindro % 10) * 20;
+  const angCabeza = (2 * Math.PI / sectores) * cabeza.sector;
+  ctx.beginPath();
+  ctx.arc(centroX + radioCabeza * Math.cos(angCabeza), centroY + radioCabeza * Math.sin(angCabeza), 8, 0, 2 * Math.PI);
+  ctx.fill();
+}
+
+// -------------------- Animación y simulación --------------------
+function animarMovimiento(destinoCilindro, destinoSector, callback) {
+  // animación radial (cilindro)
+  const pasoCil = destinoCilindro > cabeza.cilindro ? 1 : -1;
+  const moverCilindro = () => {
+    if (pausado) { setTimeout(moverCilindro, 100); return; }
+    if (cabeza.cilindro === destinoCilindro) {
+      // animación angular (sector) opcional: aquí solo actualizamos directo para simplificar
+      cabeza.sector = destinoSector;
+      dibujarDisco();
+      callback();
+      return;
+    }
+    cabeza.cilindro += pasoCil;
+    pistasRecorridas++;
+    dibujarDisco();
+    setTimeout(moverCilindro, 30);
+  };
+  moverCilindro();
+}
+
+function mostrarMetricas() {
+  const promedio = tiemposEspera.length
+    ? tiemposEspera.reduce((a, b) => a + b, 0) / tiemposEspera.length
+    : 0;
+  const maximo = tiemposEspera.length ? Math.max(...tiemposEspera) : 0;
+
+  metricasDiv.innerHTML = `
+    <table>
+      <tr><th>Métrica</th><th>Valor</th></tr>
+      <tr><td>Pistas recorridas</td><td>${pistasRecorridas}</td></tr>
+      <tr><td>Cambios de dirección</td><td>${cambiosDireccion}</td></tr>
+      <tr><td>Tiempo promedio de espera (s)</td><td>${promedio.toFixed(2)}</td></tr>
+      <tr><td>Tiempo máximo de espera (s)</td><td>${maximo.toFixed(2)}</td></tr>
+    </table>
+  `;
+}
+
+function simular() {
+  if (corriendo) {
+    registrar("La simulación ya está corriendo.");
+    return;
+  }
+  if (cola.length === 0) {
+    registrar("No hay peticiones en cola para simular.");
+    return;
+  }
+  corriendo = true;
+  const algoritmo = document.getElementById("planificador").value;
+
+  const paso = () => {
+    if (pausado) { setTimeout(paso, 150); return; }
+    if (cola.length === 0) {
+      registrar("Simulación terminada.");
+      mostrarMetricas();
+      corriendo = false;
+      return;
+    }
+
+    const p = seleccionarSiguiente(algoritmo);
+    if (!p) { registrar("No hay selección posible."); corriendo = false; return; }
+
+    // Lógica para contar cambios de dirección para todos los algoritmos
+    const nuevaDireccion = p.cilindro > cabeza.cilindro ? 1 : (p.cilindro < cabeza.cilindro ? -1 : cabeza.direccion);
+    if (cabeza.cilindro !== p.cilindro && cabeza.direccion !== nuevaDireccion) {
+        cabeza.direccion = nuevaDireccion;
+        cambiosDireccion++;
+        registrar(`Cambio de dirección a ${cabeza.direccion === 1 ? 'interior' : 'exterior'}. Total: ${cambiosDireccion}`);
+    }
+
+    registrar(`Atendiendo (cara=${p.cara}, cilindro=${p.cilindro}, sector=${p.sector}) ronda ${p.ronda}`);
+    animarMovimiento(p.cilindro, p.sector, () => {
+      p.atendida = Date.now();
+      tiemposEspera.push((p.atendida - p.llegada) / 1000);
+
+      // quitar de cola
+      const idx = cola.indexOf(p);
+      if (idx >= 0) cola.splice(idx, 1);
+
+      atendidasTotal++;
+
+      // gestionar llegadas de nuevas rondas según progreso
+      gestionarLlegadas();
+
+      // siguiente paso tras breve pausa
+      setTimeout(paso, 200);
+    });
+  };
+
+  paso();
+}
+
+// -------------------- Eventos de UI --------------------
+document.getElementById("generar").onclick = () => {
+  limpiarTodo();
+  generarYAlmacenarRondas();
+  dibujarDisco();
+};
+
+document.getElementById("simular").onclick = () => {
+  if (rondasOriginales.length === 0) {
+    registrar("No hay peticiones generadas. Pulsa 'Generar Peticiones' primero.");
+    return;
+  }
+  reiniciarSimulacion();
+  dibujarDisco();
+  simular();
+};
+
+document.getElementById("pausar").onclick = () => {
+  pausado = !pausado;
+  registrar(pausado ? "Simulación pausada." : "Simulación reanudada.");
+};
+
+document.getElementById("limpiar").onclick = () => {
+  limpiarTodo();
+};
+
+// Dibuja al cargar
+dibujarDisco();
+</script>
+</body>
+</html>
